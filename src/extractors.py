@@ -5,6 +5,8 @@ from typing import Iterable
 
 from .models import ExtractedData, Position
 
+DEFAULT_STORAGE_TEMPERATURE_EN = "+15C to +25C ambient"
+
 
 def _clean_space(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
@@ -337,9 +339,13 @@ def merge_extraction(
     pi_data.period_of_validity = spec_data.get("period_of_validity") or pi_data.period_of_validity
     pi_data.specification_date = spec_data.get("specification_date") or pi_data.specification_date
     pi_data.storage_temperature = msds_data.get("storage_temperature") or pi_data.storage_temperature
+    if not pi_data.storage_temperature:
+        pi_data.storage_temperature = DEFAULT_STORAGE_TEMPERATURE_EN
 
     for position in pi_data.positions:
         if not position.currency:
             position.currency = pi_data.currency
+        if not position.storage_temperature:
+            position.storage_temperature = pi_data.storage_temperature
 
     return pi_data

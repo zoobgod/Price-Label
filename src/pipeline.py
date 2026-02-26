@@ -42,6 +42,7 @@ def run_extraction_pipeline(
     force_ocr_pi: bool = True,
     force_ocr_specification: bool = False,
     force_ocr_msds: bool = True,
+    **_compat_kwargs: object,
 ) -> tuple[ExtractedData, dict]:
     logs: dict = {}
 

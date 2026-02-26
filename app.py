@@ -7,7 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pandas as pd
 import streamlit as st
 
-from src.doc_builder import generate_label_doc, generate_price_list_doc
+from src.doc_builder import generate_label_docs_by_temperature, generate_price_list_doc
 from src.models import ExtractedData, Position
 from src.pipeline import run_extraction_pipeline
 
@@ -45,21 +45,50 @@ def _df_to_positions(df: pd.DataFrame) -> list[Position]:
                 unit_price=_to_float(unit_price),
                 total_price=_to_float(total_price),
                 currency=str(row.get("currency", "")).strip(),
+                storage_temperature=str(row.get("storage_temperature", "")).strip(),
             )
         )
     return rows
 
 
-def _pack_outputs(price_docx: bytes, label_docx: bytes) -> bytes:
+def _pack_outputs(price_docx: bytes, label_docs: dict[str, bytes]) -> bytes:
     bio = BytesIO()
     with ZipFile(bio, "w", compression=ZIP_DEFLATED) as zf:
         zf.writestr("Proforma_Invoice.docx", price_docx)
-        zf.writestr("Label.docx", label_docx)
+        for filename, content in label_docs.items():
+            zf.writestr(filename, content)
     return bio.getvalue()
 
 
+def _call_pipeline(
+    pi_pdf_bytes: bytes,
+    msds_pdf_bytes: bytes | None,
+    specification_pdf_bytes: bytes | None,
+    force_ocr_pi: bool,
+    force_ocr_specification: bool,
+    force_ocr_msds: bool,
+):
+    # Backward-compatibility path for environments where an older pipeline signature is loaded.
+    try:
+        return run_extraction_pipeline(
+            pi_pdf_bytes=pi_pdf_bytes,
+            msds_pdf_bytes=msds_pdf_bytes,
+            specification_pdf_bytes=specification_pdf_bytes,
+            force_ocr_pi=force_ocr_pi,
+            force_ocr_specification=force_ocr_specification,
+            force_ocr_msds=force_ocr_msds,
+        )
+    except TypeError:
+        return run_extraction_pipeline(
+            pi_pdf_bytes=pi_pdf_bytes,
+            msds_pdf_bytes=msds_pdf_bytes,
+            specification_pdf_bytes=specification_pdf_bytes,
+            force_ocr_msds=force_ocr_msds,
+        )
+
+
 st.title("Pharmacopeia Customs Document Builder")
-st.caption("Upload PI + MSDS + Specification PDFs, review extracted data, then generate Price List and Label files.")
+st.caption("Upload PI + MSDS + Specification PDFs, review extracted data, then generate Proforma Invoice and Label files.")
 
 with st.sidebar:
     st.header("Inputs")
@@ -67,11 +96,10 @@ with st.sidebar:
     msds_pdf = st.file_uploader("MSDS PDF", type=["pdf"], key="msds_pdf")
     spec_pdf = st.file_uploader("Specification PDF", type=["pdf"], key="spec_pdf")
 
-    st.header("Optional Templates")
+    st.header("Templates")
     st.caption(
-        "Template placeholders supported: {{INVOICE_NO}}, {{INVOICE_DATE}}, {{BUYER_NAME}}, {{TERMS_OF_DELIVERY}},"
-        " {{PERIOD_OF_VALIDITY}}, {{SPECIFICATION_DATE}}, {{STORAGE_TEMPERATURE}}, {{COMPANY_INFO}},"
-        " {{POSITIONS_TABLE}}, {{POSITION_1_NAME_EN}}, {{POSITION_1_NAME_RU}}, {{POSITION_1_QUANTITY}}"
+        "Placeholders supported include POSITION_1..N, STORAGE_TEMPERATURE_EN/RU, "
+        "EXPORTER_COMPANY_NAME_EN/RU, EXPORTER_COMPANY_ADRESS_EN, INVOICE_DATE, TERMS_OF_DELIVERY, PERIOD_OF_VALIDITY."
     )
     price_template = st.file_uploader("Price List .docx template", type=["docx"], key="price_tpl")
     label_template = st.file_uploader("Label .docx template", type=["docx"], key="label_tpl")
@@ -88,7 +116,7 @@ if run:
         st.error("PI/Invoice PDF is required.")
     else:
         with st.spinner("Extracting fields from PDFs..."):
-            extracted, logs = run_extraction_pipeline(
+            extracted, logs = _call_pipeline(
                 pi_pdf_bytes=pi_pdf.getvalue(),
                 msds_pdf_bytes=msds_pdf.getvalue() if msds_pdf else None,
                 specification_pdf_bytes=spec_pdf.getvalue() if spec_pdf else None,
@@ -96,13 +124,24 @@ if run:
                 force_ocr_specification=force_spec_ocr,
                 force_ocr_msds=force_msds_ocr,
             )
+
         st.session_state["extracted"] = extracted
         st.session_state["logs"] = logs
+        st.session_state.setdefault(
+            "company_profile",
+            {
+                "exporter_company_name_en": extracted.exporter_name,
+                "exporter_company_name_ru": extracted.exporter_name_ru or extracted.exporter_name,
+                "exporter_company_address_en": extracted.exporter_address,
+                "storage_temperature_ru": "",
+            },
+        )
+
         pi_meta = (logs.get("pi") or {}).get("meta") or {}
-        msds_meta = (logs.get("msds") or {}).get("meta") or {}
-        if (pi_pdf or msds_pdf or spec_pdf) and not (pi_meta.get("tesseract_available", False) or msds_meta.get("tesseract_available", False)):
+        if not pi_meta.get("tesseract_available", False):
             st.warning(
-                "Tesseract OCR is not available on this machine. Scanned PDFs may extract poorly until OCR is installed."
+                "Tesseract OCR is not available. On Streamlit Cloud add `packages.txt` with "
+                "`tesseract-ocr` and `tesseract-ocr-rus` then redeploy."
             )
 
 if "extracted" in st.session_state:
@@ -118,29 +157,51 @@ if "extracted" in st.session_state:
             extracted.invoice_no = st.text_input("Invoice No", value=extracted.invoice_no)
             extracted.invoice_date = st.text_input("Invoice Date", value=extracted.invoice_date)
             extracted.buyer_name = st.text_input("Buyer Name", value=extracted.buyer_name)
-            extracted.buyer_address = st.text_area("Buyer Address", value=extracted.buyer_address, height=120)
-            extracted.exporter_name = st.text_input("Exporter Name", value=extracted.exporter_name)
-            extracted.exporter_address = st.text_area("Exporter Address", value=extracted.exporter_address, height=120)
+            extracted.buyer_address = st.text_area("Buyer Address", value=extracted.buyer_address, height=110)
+            extracted.exporter_name = st.text_input("Exporter Name (EN)", value=extracted.exporter_name)
+            extracted.exporter_name_ru = st.text_input(
+                "Exporter Name (RU)",
+                value=extracted.exporter_name_ru or extracted.exporter_name,
+            )
 
         with c2:
             extracted.terms_of_delivery = st.text_input("Terms Of Delivery", value=extracted.terms_of_delivery)
             extracted.period_of_validity = st.text_input("Period Of Validity", value=extracted.period_of_validity)
             extracted.specification_date = st.text_input("Specification Date", value=extracted.specification_date)
-            extracted.storage_temperature = st.text_area(
-                "Storage Temperature (from MSDS)", value=extracted.storage_temperature, height=100
+            extracted.storage_temperature = st.text_input(
+                "Default Storage Temperature (fallback)",
+                value=extracted.storage_temperature,
             )
             extracted.currency = st.text_input("Default Currency", value=extracted.currency)
 
-        company_info = st.text_area(
-            "Company info block (goes at bottom of label and in price list)",
-            value=st.session_state.get("company_info", ""),
-            height=120,
-        )
-        st.session_state["company_info"] = company_info
+        st.markdown("**Template Company Profile**")
+        profile = st.session_state.get("company_profile", {})
+        p1, p2 = st.columns(2)
+        with p1:
+            profile["exporter_company_name_en"] = st.text_input(
+                "{{EXPORTER_COMPANY_NAME_EN}}",
+                value=profile.get("exporter_company_name_en", extracted.exporter_name),
+            )
+            profile["exporter_company_name_ru"] = st.text_input(
+                "{{EXPORTER_COMPANY_NAME_RU}}",
+                value=profile.get("exporter_company_name_ru", extracted.exporter_name_ru or extracted.exporter_name),
+            )
+        with p2:
+            profile["exporter_company_address_en"] = st.text_area(
+                "{{EXPORTER_COMPANY_ADRESS_EN}}",
+                value=profile.get("exporter_company_address_en", extracted.exporter_address),
+                height=90,
+            )
+            profile["storage_temperature_ru"] = st.text_input(
+                "{{STORAGE_TEMPERATURE_RU}} override (optional)",
+                value=profile.get("storage_temperature_ru", ""),
+            )
+
+        st.session_state["company_profile"] = profile
         st.session_state["extracted"] = extracted
 
     with tab_positions:
-        st.write("Edit extracted product rows. Add/remove rows as needed.")
+        st.write("Edit extracted positions. Set `storage_temperature` per row to split labels by temperature groups.")
         df = _positions_to_df(extracted.positions)
         edited = st.data_editor(
             df,
@@ -157,19 +218,22 @@ if "extracted" in st.session_state:
                 "unit_price",
                 "total_price",
                 "currency",
+                "storage_temperature",
             ],
         )
 
         if st.button("Copy EN Name/Packing -> RU (empty cells only)"):
             copied_positions = _df_to_positions(edited)
-            for p in copied_positions:
-                if not p.name_ru:
-                    p.name_ru = p.name_en
-                if not p.packing_ru:
-                    p.packing_ru = p.packing_en
+            for position in copied_positions:
+                if not position.name_ru:
+                    position.name_ru = position.name_en
+                if not position.packing_ru:
+                    position.packing_ru = position.packing_en
+                if not position.storage_temperature:
+                    position.storage_temperature = extracted.storage_temperature
             extracted.positions = copied_positions
             st.session_state["extracted"] = extracted
-            st.success("Copied EN values into empty RU fields. Open Positions tab again to review.")
+            st.success("Copied EN values to empty RU fields and applied default temperatures where empty.")
 
         if st.button("Apply Position Edits"):
             extracted.positions = _df_to_positions(edited)
@@ -177,23 +241,26 @@ if "extracted" in st.session_state:
             st.success("Positions updated.")
 
     with tab_generate:
-        st.write("Generate output documents based on current reviewed fields.")
+        st.write("Generate outputs. If positions have different temperatures, separate label files are produced per temperature.")
 
         if st.button("Build Output Files", type="primary"):
             tpl_price = price_template.getvalue() if price_template else None
             tpl_label = label_template.getvalue() if label_template else None
+            company_profile = st.session_state.get("company_profile", {})
 
             price_docx = generate_price_list_doc(
                 data=extracted,
-                company_info=st.session_state.get("company_info", ""),
+                company_info="",
                 template_bytes=tpl_price,
+                company_profile=company_profile,
             )
-            label_docx = generate_label_doc(
+            label_docs = generate_label_docs_by_temperature(
                 data=extracted,
-                company_info=st.session_state.get("company_info", ""),
+                company_info="",
                 template_bytes=tpl_label,
+                company_profile=company_profile,
             )
-            bundle = _pack_outputs(price_docx, label_docx)
+            bundle = _pack_outputs(price_docx, label_docs)
 
             st.download_button(
                 "Download Proforma Invoice (.docx)",
@@ -201,14 +268,17 @@ if "extracted" in st.session_state:
                 file_name="Proforma_Invoice.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
+
+            for filename, label_bytes in label_docs.items():
+                st.download_button(
+                    f"Download {filename}",
+                    data=label_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+
             st.download_button(
-                "Download Label (.docx)",
-                data=label_docx,
-                file_name="Label.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
-            st.download_button(
-                "Download Both (.zip)",
+                "Download All Outputs (.zip)",
                 data=bundle,
                 file_name="Customs_Docs.zip",
                 mime="application/zip",
@@ -217,7 +287,6 @@ if "extracted" in st.session_state:
     with tab_debug:
         logs = st.session_state.get("logs", {})
         st.json(logs)
-
         for name, payload in logs.items():
             st.subheader(f"{name.upper()} text preview")
             st.code(payload.get("text_preview", ""), language="text")

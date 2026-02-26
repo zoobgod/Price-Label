@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from io import BytesIO
-from typing import Any
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -10,6 +10,9 @@ from docx.oxml.ns import qn
 from docx.shared import Pt
 
 from .models import ExtractedData, Position
+
+DEFAULT_STORAGE_TEMPERATURE_EN = "+15C to +25C ambient"
+DEFAULT_STORAGE_TEMPERATURE_RU = "+15C до +25C ambient"
 
 
 def _set_default_font(document: Document, font_name: str = "Times New Roman", size_pt: int = 12) -> None:
@@ -19,230 +22,150 @@ def _set_default_font(document: Document, font_name: str = "Times New Roman", si
     style.font.size = Pt(size_pt)
 
 
-def _add_key_value(document: Document, key: str, value: str) -> None:
-    paragraph = document.add_paragraph()
-    run_k = paragraph.add_run(f"{key}: ")
-    run_k.bold = True
-    paragraph.add_run(value or "-")
-
-
 def _price_str(value: float | None) -> str:
     if value is None:
-        return "-"
+        return ""
     return f"{value:,.2f}"
 
 
-def _position_context(positions: list[Position]) -> str:
-    rows: list[str] = []
-    for idx, pos in enumerate(positions, start=1):
-        rows.append(
-            " | ".join(
-                [
-                    str(idx),
-                    pos.code or "-",
-                    pos.name_en or "-",
-                    str(pos.quantity if pos.quantity is not None else "-"),
-                    pos.packing_en or "-",
-                    _price_str(pos.unit_price),
-                    _price_str(pos.total_price),
-                    pos.currency or "-",
-                ]
-            )
-        )
-    return "\n".join(rows)
+def _qty_str(value: float | None) -> str:
+    if value is None:
+        return ""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:g}"
 
 
-def _build_template_context(data: ExtractedData, company_info: str) -> dict[str, str]:
-    first = data.positions[0] if data.positions else Position()
-    return {
-        "INVOICE_NO": data.invoice_no,
-        "INVOICE_DATE": data.invoice_date,
-        "BUYER_NAME": data.buyer_name,
-        "BUYER_ADDRESS": data.buyer_address,
-        "EXPORTER_NAME": data.exporter_name,
-        "EXPORTER_ADDRESS": data.exporter_address,
-        "TERMS_OF_DELIVERY": data.terms_of_delivery,
-        "PERIOD_OF_VALIDITY": data.period_of_validity,
-        "SPECIFICATION_DATE": data.specification_date,
-        "STORAGE_TEMPERATURE": data.storage_temperature,
-        "COMPANY_INFO": company_info,
-        "POSITIONS_TABLE": _position_context(data.positions),
-        "POSITION_1_NAME_EN": first.name_en,
-        "POSITION_1_NAME_RU": first.name_ru or first.name_en,
-        "POSITION_1_QUANTITY": str(first.quantity or ""),
-        "POSITION_1_PACKING_EN": first.packing_en,
-        "POSITION_1_PACKING_RU": first.packing_ru or first.packing_en,
-        "POSITION_1_PRICE": _price_str(first.unit_price),
-        "POSITION_1_TOTAL": _price_str(first.total_price),
-        "POSITION_1_CURRENCY": first.currency or data.currency,
-    }
+def _money_with_currency(value: float | None, currency: str) -> str:
+    money = _price_str(value)
+    if not money:
+        return ""
+    return f"{money} {currency}".strip()
 
 
-def _replace_placeholders_in_paragraph(paragraph, context: dict[str, str]) -> None:
-    # python-docx run-level replacement is fragile; replace full paragraph text to make simple templates usable.
-    text = paragraph.text
-    changed = False
-    for k, v in context.items():
-        key = f"{{{{{k}}}}}"
-        if key in text:
-            text = text.replace(key, v or "")
-            changed = True
-    if changed:
-        paragraph.text = text
+def _normalize_temp(temp: str) -> str:
+    return re.sub(r"\s+", " ", (temp or "").strip())
 
 
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())
+def _temp_ru(temp_en: str) -> str:
+    temp = _normalize_temp(temp_en) or DEFAULT_STORAGE_TEMPERATURE_EN
+    temp = temp.replace(" to ", " до ")
+    temp = temp.replace("between", "между")
+    return temp
 
 
-def _semantic_value_for_label(key_text: str, context: dict[str, str], *, doc_type: str) -> str | None:
-    text = _normalize_text(key_text)
+def _replace_tokens(text: str, context: dict[str, str]) -> tuple[str, int, int]:
+    replaced_known = 0
+    removed_unknown = 0
+    out = text
 
-    if "invoice no" in text:
-        return context.get("INVOICE_NO", "")
-    if "invoice date" in text:
-        return context.get("INVOICE_DATE", "")
-    if "buyer" in text:
-        return context.get("BUYER_NAME", "")
-    if "exporter" in text:
-        return context.get("EXPORTER_NAME", "")
-    if "terms of delivery" in text or "delivery terms" in text:
-        return context.get("TERMS_OF_DELIVERY", "")
-    if "period of validity" in text or "validity period" in text:
-        return context.get("PERIOD_OF_VALIDITY", "")
-    if "specification date" in text or "date of specification" in text:
-        return context.get("SPECIFICATION_DATE", "")
-    if text in {"date", "date."}:
-        return context.get("SPECIFICATION_DATE") or context.get("INVOICE_DATE", "")
-    if "storage" in text or "температур" in text:
-        return context.get("STORAGE_TEMPERATURE", "")
-    if "product name" in text or "наименование" in text:
-        if doc_type == "label":
-            en = context.get("POSITION_1_NAME_EN", "")
-            ru = context.get("POSITION_1_NAME_RU", "")
-            qty = context.get("POSITION_1_QUANTITY", "")
-            pk_en = context.get("POSITION_1_PACKING_EN", "")
-            pk_ru = context.get("POSITION_1_PACKING_RU", "")
-            return f"{en} / {ru} - {qty} {pk_en} / {pk_ru}".strip()
-        return context.get("POSITION_1_NAME_EN", "")
-    if "quantity" in text or "quanitty" in text or "кол-во" in text:
-        return context.get("POSITION_1_QUANTITY", "")
-    if "packing" in text or "упаков" in text:
-        if doc_type == "label":
-            return f"{context.get('POSITION_1_PACKING_EN', '')} / {context.get('POSITION_1_PACKING_RU', '')}".strip()
-        return context.get("POSITION_1_PACKING_EN", "")
-    if "price" in text and "list" not in text:
-        value = context.get("POSITION_1_PRICE", "")
-        currency = context.get("POSITION_1_CURRENCY", "")
-        return f"{value} {currency}".strip()
-    return None
+    for key, value in context.items():
+        pattern = re.compile(r"{{\s*" + re.escape(key) + r"\s*}}")
+        matches = list(pattern.finditer(out))
+        if matches:
+            replaced_known += len(matches)
+            out = pattern.sub(value, out)
+
+    unresolved = re.findall(r"{{\s*[A-Za-z0-9_]+\s*}}", out)
+    if unresolved:
+        removed_unknown += len(unresolved)
+        out = re.sub(r"{{\s*[A-Za-z0-9_]+\s*}}", "", out)
+
+    return out, replaced_known, removed_unknown
 
 
-def _replace_semantic_line(paragraph, context: dict[str, str], *, doc_type: str) -> int:
-    text = paragraph.text or ""
-    if not text.strip():
-        return 0
-
-    # Key-value line replacement (e.g. "PRODUCT NAME: ...")
-    if ":" in text:
-        left, _right = text.split(":", 1)
-        value = _semantic_value_for_label(left, context, doc_type=doc_type)
-        if value is not None:
-            paragraph.text = f"{left.strip()}: {value.strip() or '-'}"
-            return 1
-
-    normalized = _normalize_text(text)
-
-    # Label body line replacement (e.g. "<EN> / <RU> - Qty ...")
-    if doc_type == "label":
-        if "/" in text and "-" in text and "storage" not in normalized and "product name" not in normalized:
-            composed = _semantic_value_for_label("product name", context, doc_type=doc_type)
-            if composed:
-                paragraph.text = composed
-                return 1
-
-        # Also replace bilingual product lines that do not use ":" and may not include "-".
-        if (
-            "/" in text
-            and any(ch.isdigit() for ch in text)
-            and "storage" not in normalized
-            and "shipping" not in normalized
-            and "importer" not in normalized
-            and "shipper" not in normalized
-            and "contact" not in normalized
-        ):
-            composed = _semantic_value_for_label("product name", context, doc_type=doc_type)
-            if composed:
-                paragraph.text = composed
-                return 1
-
-        if "storage" in normalized or "температур" in normalized:
-            value = context.get("STORAGE_TEMPERATURE", "")
-            left = text.split(":", 1)[0] if ":" in text else "Storage"
-            paragraph.text = f"{left.strip()}: {value.strip() or '-'}"
-            return 1
-
-    # Price-list title date line where a plain date exists without explicit key.
-    if doc_type == "price":
-        has_date = re.search(r"\b\d{1,2}[-/.][A-Za-z0-9]{2,9}[-/.]\d{2,4}\b", text) or re.search(
-            r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", text
-        )
-        if has_date and context.get("SPECIFICATION_DATE"):
-            paragraph.text = re.sub(
-                r"\b\d{1,2}[-/.][A-Za-z0-9]{2,9}[-/.]\d{2,4}\b|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",
-                context["SPECIFICATION_DATE"],
-                text,
-                count=1,
-            )
-            return 1
-
-    return 0
-
-
-def fill_docx_template(template_bytes: bytes, context: dict[str, str], *, doc_type: str) -> tuple[bytes, int]:
+def fill_docx_template(template_bytes: bytes, context: dict[str, str]) -> tuple[bytes, int]:
     doc = Document(BytesIO(template_bytes))
-    replaced = 0
+    replaced_known = 0
 
-    for p in doc.paragraphs:
-        before = p.text
-        _replace_placeholders_in_paragraph(p, context)
-        if p.text != before:
-            replaced += 1
-            continue
-        replaced += _replace_semantic_line(p, context, doc_type=doc_type)
+    for paragraph in doc.paragraphs:
+        new_text, known, unknown = _replace_tokens(paragraph.text or "", context)
+        if known or unknown:
+            paragraph.text = new_text
+            replaced_known += known
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs:
-                    before = p.text
-                    _replace_placeholders_in_paragraph(p, context)
-                    if p.text != before:
-                        replaced += 1
-                        continue
-                    replaced += _replace_semantic_line(p, context, doc_type=doc_type)
-
-    if replaced and context.get("COMPANY_INFO"):
-        # If template had no company placeholder, append company details at the end.
-        if context["COMPANY_INFO"] not in "\n".join(p.text for p in doc.paragraphs):
-            doc.add_paragraph(context["COMPANY_INFO"])
+                for paragraph in cell.paragraphs:
+                    new_text, known, unknown = _replace_tokens(paragraph.text or "", context)
+                    if known or unknown:
+                        paragraph.text = new_text
+                        replaced_known += known
 
     output = BytesIO()
     doc.save(output)
-    return output.getvalue(), replaced
+    return output.getvalue(), replaced_known
 
 
-def generate_price_list_doc(
+def _build_context(
     data: ExtractedData,
-    company_info: str,
-    template_bytes: bytes | None = None,
-) -> bytes:
-    context = _build_template_context(data, company_info)
-    if template_bytes:
-        templated, replaced = fill_docx_template(template_bytes, context, doc_type="price")
-        if replaced > 0:
-            return templated
+    positions: list[Position],
+    company_profile: dict[str, str] | None,
+    temperature_en: str,
+) -> dict[str, str]:
+    company_profile = company_profile or {}
 
+    exporter_company_name_en = (
+        company_profile.get("exporter_company_name_en")
+        or data.exporter_name
+        or ""
+    )
+    exporter_company_name_ru = (
+        company_profile.get("exporter_company_name_ru")
+        or data.exporter_name_ru
+        or exporter_company_name_en
+    )
+    exporter_company_address_en = (
+        company_profile.get("exporter_company_address_en")
+        or data.exporter_address
+        or ""
+    )
+
+    storage_en = _normalize_temp(temperature_en) or DEFAULT_STORAGE_TEMPERATURE_EN
+    storage_ru = company_profile.get("storage_temperature_ru") or _temp_ru(storage_en)
+
+    context: dict[str, str] = {
+        "INVOICE_NO": data.invoice_no or "",
+        "INVOICE_DATE": data.invoice_date or "",
+        "TERMS_OF_DELIVERY": data.terms_of_delivery or "",
+        "PERIOD_OF_VALIDITY": data.period_of_validity or "",
+        "SPECIFICATION_DATE": data.specification_date or "",
+        "STORAGE_TEMPERATURE": storage_en,
+        "STORAGE_TEMPERATURE_EN": storage_en,
+        "STORAGE_TEMPERATURE_RU": storage_ru,
+        "EXPORTER_COMPANY_NAME_EN": exporter_company_name_en,
+        "EXPORTER_COMPANY_NAME_RU": exporter_company_name_ru,
+        "EXPORTER_COMPANY_ADDRESS_EN": exporter_company_address_en,
+        "EXPORTER_COMPANY_ADRESS_EN": exporter_company_address_en,
+    }
+
+    default_currency = data.currency or ""
+
+    for index, position in enumerate(positions, start=1):
+        qty = _qty_str(position.quantity)
+        qty_en = f"{qty} un" if qty else ""
+        qty_ru = f"{qty} шт" if qty else ""
+        packing_en = position.packing_en or ""
+        packing_ru = position.packing_ru or packing_en
+        currency = position.currency or default_currency
+
+        context[f"POSITION_{index}_NAME_EN"] = position.name_en or ""
+        context[f"POSITION_{index}_NAME_RU"] = position.name_ru or position.name_en or ""
+        context[f"POSITION_{index}_QUANTITY"] = qty
+        context[f"POSITION_{index}_QUANTITY_EN"] = qty_en
+        context[f"POSITION_{index}_QUANTITY_RU"] = qty_ru
+        context[f"POSITION_{index}_PACKING"] = packing_en
+        context[f"POSITION_{index}_PACKING_EN"] = packing_en
+        context[f"POSITION_{index}_PACKING_RU"] = packing_ru
+        context[f"POSITION_{index}_UNIT_PRICE"] = _money_with_currency(position.unit_price, currency)
+        context[f"POSITION_{index}_TOTAL_PRICE"] = _money_with_currency(position.total_price, currency)
+        context[f"POSITION_{index}_CURRENCY"] = currency
+
+    return context
+
+
+def _build_default_price_doc(data: ExtractedData, positions: list[Position], company_profile: dict[str, str] | None) -> bytes:
     doc = Document()
     _set_default_font(doc)
 
@@ -253,92 +176,150 @@ def generate_price_list_doc(
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.runs[0].bold = True
 
-    _add_key_value(doc, "Date", data.specification_date or data.invoice_date)
-    _add_key_value(doc, "Invoice No", data.invoice_no)
-    _add_key_value(doc, "Buyer", data.buyer_name)
-    _add_key_value(doc, "Buyer Address", data.buyer_address)
-    _add_key_value(doc, "Exporter", data.exporter_name)
-    _add_key_value(doc, "Exporter Address", data.exporter_address)
+    date_paragraph = doc.add_paragraph(data.invoice_date or "")
+    date_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+
+    for idx, position in enumerate(positions):
+        if idx > 0:
+            doc.add_paragraph()
+        qty = _qty_str(position.quantity)
+        currency = position.currency or data.currency or ""
+        doc.add_paragraph(f"PRODUCT NAME: {position.name_en or '-'}")
+        doc.add_paragraph(f"QUANITTY: {qty or '-'}")
+        doc.add_paragraph(f"PACKING: {position.packing_en or '-'}")
+        doc.add_paragraph(f"UNIT PRICE: {_money_with_currency(position.unit_price, currency) or '-'}")
+        doc.add_paragraph(f"TOTAL AMOUNT: {_money_with_currency(position.total_price, currency) or '-'}")
 
     doc.add_paragraph()
-
-    table = doc.add_table(rows=1, cols=8)
-    table.style = "Table Grid"
-    hdr = table.rows[0].cells
-    headers = ["#", "Code", "Product Name (EN)", "Qty", "Packing", "Unit Price", "Total", "Currency"]
-    for idx, h in enumerate(headers):
-        hdr[idx].text = h
-
-    for i, position in enumerate(data.positions, start=1):
-        row = table.add_row().cells
-        row[0].text = str(i)
-        row[1].text = position.code or "-"
-        row[2].text = position.name_en or "-"
-        row[3].text = str(position.quantity if position.quantity is not None else "-")
-        row[4].text = position.packing_en or "-"
-        row[5].text = _price_str(position.unit_price)
-        row[6].text = _price_str(position.total_price)
-        row[7].text = position.currency or data.currency or "-"
-
+    doc.add_paragraph(f"TERMS OF DELIVERY: {data.terms_of_delivery or '-'}")
+    doc.add_paragraph(f"PERIOD OF VALIDITY: {data.period_of_validity or '-'}")
     doc.add_paragraph()
-    _add_key_value(doc, "Terms of Delivery", data.terms_of_delivery)
-    _add_key_value(doc, "Period of Validity", data.period_of_validity)
-    _add_key_value(doc, "Date of Specification", data.specification_date)
-
-    if company_info.strip():
-        doc.add_paragraph()
-        _add_key_value(doc, "Company Info", company_info.strip())
+    doc.add_paragraph("stamp / signature")
 
     output = BytesIO()
     doc.save(output)
     return output.getvalue()
+
+
+def generate_price_list_doc(
+    data: ExtractedData,
+    company_info: str,
+    template_bytes: bytes | None = None,
+    company_profile: dict[str, str] | None = None,
+) -> bytes:
+    positions = data.positions or [Position()]
+    temperature = positions[0].storage_temperature or data.storage_temperature or DEFAULT_STORAGE_TEMPERATURE_EN
+    context = _build_context(data, positions, company_profile, temperature)
+
+    if template_bytes:
+        templated, replaced = fill_docx_template(template_bytes, context)
+        if replaced > 0:
+            return templated
+
+    return _build_default_price_doc(data, positions, company_profile)
+
+
+def _default_label_doc(
+    data: ExtractedData,
+    positions: list[Position],
+    temperature_en: str,
+    company_profile: dict[str, str] | None,
+) -> bytes:
+    company_profile = company_profile or {}
+    context = _build_context(data, positions, company_profile, temperature_en)
+
+    doc = Document()
+    _set_default_font(doc)
+
+    header = doc.add_paragraph("Наименование товара / Product name - Quantity / Кол-во:")
+    header.runs[0].bold = True
+
+    for pos_index, _position in enumerate(positions, start=1):
+        line = (
+            f"{context.get(f'POSITION_{pos_index}_NAME_EN', '')} / {context.get(f'POSITION_{pos_index}_NAME_RU', '')} "
+            f"{context.get(f'POSITION_{pos_index}_QUANTITY_EN', '')} "
+            f"({context.get(f'POSITION_{pos_index}_PACKING_EN', '')}) / "
+            f"{context.get(f'POSITION_{pos_index}_QUANTITY_RU', '')} "
+            f"({context.get(f'POSITION_{pos_index}_PACKING_RU', '')})"
+        ).strip()
+        doc.add_paragraph(line)
+
+    doc.add_paragraph(
+        f"Shipping Conditions: Require temperature-controlled shipping must be kept between ({context['STORAGE_TEMPERATURE_EN']},)"
+    )
+    doc.add_paragraph(
+        f"Условия транспортировки: требуется контролируемая температура при транспортировке ({context['STORAGE_TEMPERATURE_RU']},)"
+    )
+    doc.add_paragraph(
+        f"Shipper/Отправитель: \"{context['EXPORTER_COMPANY_NAME_EN']}\" / «{context['EXPORTER_COMPANY_NAME_RU']}»"
+    )
+    doc.add_paragraph(
+        f"Contact information / Контактная информация: {context['EXPORTER_COMPANY_ADRESS_EN']}"
+    )
+
+    output = BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
+def _temperature_slug(temp: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", temp).strip("_")
+    return slug[:60] or "ambient"
+
+
+def _group_positions_by_temperature(data: ExtractedData) -> OrderedDict[str, list[Position]]:
+    grouped: OrderedDict[str, list[Position]] = OrderedDict()
+    positions = data.positions or [Position()]
+
+    for position in positions:
+        temp = _normalize_temp(position.storage_temperature) or _normalize_temp(data.storage_temperature)
+        if not temp:
+            temp = DEFAULT_STORAGE_TEMPERATURE_EN
+        if temp not in grouped:
+            grouped[temp] = []
+        grouped[temp].append(position)
+
+    return grouped
+
+
+def generate_label_docs_by_temperature(
+    data: ExtractedData,
+    company_info: str,
+    template_bytes: bytes | None = None,
+    company_profile: dict[str, str] | None = None,
+) -> OrderedDict[str, bytes]:
+    grouped = _group_positions_by_temperature(data)
+    docs: OrderedDict[str, bytes] = OrderedDict()
+    many = len(grouped) > 1
+
+    for temperature, positions in grouped.items():
+        context = _build_context(data, positions, company_profile, temperature)
+        label_bytes: bytes | None = None
+
+        if template_bytes:
+            templated, replaced = fill_docx_template(template_bytes, context)
+            if replaced > 0:
+                label_bytes = templated
+
+        if label_bytes is None:
+            label_bytes = _default_label_doc(data, positions, temperature, company_profile)
+
+        filename = f"Label_{_temperature_slug(temperature)}.docx" if many else "Label.docx"
+        docs[filename] = label_bytes
+
+    return docs
 
 
 def generate_label_doc(
     data: ExtractedData,
     company_info: str,
     template_bytes: bytes | None = None,
+    company_profile: dict[str, str] | None = None,
 ) -> bytes:
-    context = _build_template_context(data, company_info)
-    if template_bytes:
-        templated, replaced = fill_docx_template(template_bytes, context, doc_type="label")
-        if replaced > 0:
-            return templated
-
-    doc = Document()
-    _set_default_font(doc)
-
-    if not data.positions:
-        data.positions = [Position()]
-
-    for idx, position in enumerate(data.positions):
-        table = doc.add_table(rows=3, cols=1)
-        table.style = "Table Grid"
-
-        header = table.rows[0].cells[0].paragraphs[0]
-        header.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        hrun = header.add_run("Наименование товара / Product name - Quantity / Кол-во")
-        hrun.bold = True
-
-        middle = table.rows[1].cells[0].paragraphs[0]
-        middle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        ru_name = position.name_ru or "[RU name]"
-        ru_pack = position.packing_ru or position.packing_en or ""
-        qty = f"{position.quantity:g}" if position.quantity is not None else ""
-        middle.add_run(
-            f"{position.name_en or '[EN name]'} / {ru_name} - {qty} {position.packing_en} / {ru_pack}".strip()
-        )
-
-        bottom = table.rows[2].cells[0].paragraphs[0]
-        bottom.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        bottom.add_run(f"Storage: {data.storage_temperature or '[Not extracted]'}")
-
-        if company_info.strip():
-            doc.add_paragraph(company_info.strip())
-
-        if idx < len(data.positions) - 1:
-            doc.add_page_break()
-
-    output = BytesIO()
-    doc.save(output)
-    return output.getvalue()
+    docs = generate_label_docs_by_temperature(
+        data=data,
+        company_info=company_info,
+        template_bytes=template_bytes,
+        company_profile=company_profile,
+    )
+    return next(iter(docs.values()))

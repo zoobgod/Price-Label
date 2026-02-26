@@ -15,6 +15,7 @@ class Position:
     unit_price: float | None = None
     total_price: float | None = None
     currency: str = ""
+    storage_temperature: str = ""
 
 
 @dataclass
@@ -38,6 +39,7 @@ class ExtractedData:
     buyer_name: str = ""
     buyer_address: str = ""
     exporter_name: str = ""
+    exporter_name_ru: str = ""
     exporter_address: str = ""
     terms_of_delivery: str = ""
     period_of_validity: str = ""

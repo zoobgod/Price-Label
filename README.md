@@ -5,21 +5,18 @@ This app ingests:
 - MSDS PDF
 - Specification PDF
 
-Then it extracts customs-relevant fields and generates:
+It generates:
 1. `Proforma_Invoice.docx`
-2. `Label.docx`
+2. Label output(s):
+- `Label.docx` when all positions share one storage temperature
+- `Label_<temperature>.docx` per temperature group when positions differ
 
-## What it extracts
-- From PI: product rows (positions), quantity, unit/total price, currency, buyer/exporter, invoice no/date
-- From Specification: terms of delivery, period of validity, specification date
-- From MSDS: storage temperature (OCR-enabled for scanned PDFs)
+## Extraction behavior
+- PI extraction runs native text + OCR candidate and auto-selects better structured parse.
+- MSDS/spec extraction supports OCR for scanned PDFs.
+- If no storage temperature is found, default is `+15C to +25C ambient`.
 
-## OCR approach
-- Native PDF text extraction first (`pypdf`)
-- OCR fallback (`PyMuPDF` rendering + `pytesseract`) for low-text/scanned pages
-- PI/Invoice OCR can be force-enabled from UI (enabled by default)
-
-## Install
+## Install (local)
 
 ```bash
 python3 -m venv .venv
@@ -27,52 +24,48 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Install Tesseract engine (required for scanned PDFs):
+Install OCR engine:
 
 ```bash
 # macOS
 brew install tesseract
-
-# Optional extra language pack
 brew install tesseract-lang
 ```
 
-## Run
+Run:
 
 ```bash
 streamlit run app.py
 ```
 
-## Template support (optional)
-You can upload custom `.docx` templates for Price List and Label.
+## Streamlit Cloud
+This repo includes `packages.txt` for system dependencies:
+- `tesseract-ocr`
+- `tesseract-ocr-rus`
 
-Use placeholders like:
-- `{{INVOICE_NO}}`
+Streamlit Cloud installs these automatically on deploy.
+
+## Template placeholders
+The app supports fixed placeholders used by your templates, including:
 - `{{INVOICE_DATE}}`
-- `{{BUYER_NAME}}`
-- `{{BUYER_ADDRESS}}`
-- `{{EXPORTER_NAME}}`
-- `{{EXPORTER_ADDRESS}}`
 - `{{TERMS_OF_DELIVERY}}`
 - `{{PERIOD_OF_VALIDITY}}`
-- `{{SPECIFICATION_DATE}}`
-- `{{STORAGE_TEMPERATURE}}`
-- `{{COMPANY_INFO}}`
-- `{{POSITIONS_TABLE}}`
-- `{{POSITION_1_NAME_EN}}`
-- `{{POSITION_1_NAME_RU}}`
-- `{{POSITION_1_QUANTITY}}`
-- `{{POSITION_1_PACKING_EN}}`
-- `{{POSITION_1_PACKING_RU}}`
-- `{{POSITION_1_PRICE}}`
-- `{{POSITION_1_TOTAL}}`
-- `{{POSITION_1_CURRENCY}}`
+- `{{STORAGE_TEMPERATURE_EN}}`
+- `{{STORAGE_TEMPERATURE_RU}}`
+- `{{EXPORTER_COMPANY_NAME_EN}}`
+- `{{EXPORTER_COMPANY_NAME_RU}}`
+- `{{EXPORTER_COMPANY_ADRESS_EN}}`
+- `{{POSITION_1_NAME_EN}} ... {{POSITION_N_NAME_EN}}`
+- `{{POSITION_1_NAME_RU}} ... {{POSITION_N_NAME_RU}}`
+- `{{POSITION_1_QUANTITY_EN}} ... {{POSITION_N_QUANTITY_EN}}`
+- `{{POSITION_1_QUANTITY_RU}} ... {{POSITION_N_QUANTITY_RU}}`
+- `{{POSITION_1_PACKING_EN}} ... {{POSITION_N_PACKING_EN}}`
+- `{{POSITION_1_PACKING_RU}} ... {{POSITION_N_PACKING_RU}}`
+- `{{POSITION_1_UNIT_PRICE}} ... {{POSITION_N_UNIT_PRICE}}`
+- `{{POSITION_1_TOTAL_PRICE}} ... {{POSITION_N_TOTAL_PRICE}}`
 
-Template behavior:
-- First pass: explicit `{{KEY}}` placeholders
-- Second pass: semantic key matching (e.g., `PRODUCT NAME:`, `QUANTITY:`, `PACKING:`, `TERMS OF DELIVERY:`, `Storage:`)
-- If no fields can be mapped, the app automatically falls back to built-in generated documents (it will not return an unchanged template).
+Unresolved placeholders are cleared automatically.
 
 ## Notes
-- Extraction quality depends on source PDF quality and consistent formatting.
-- Always review fields in the UI before generating final customs documents.
+- Use the Positions tab to set `storage_temperature` per position if products must be split by temperature.
+- Always review extracted fields before final export.
