@@ -59,7 +59,7 @@ def run_extraction_pipeline(
         pi_text_ocr = extract_pdf_text(pi_pdf_bytes, force_ocr=True, prefer_ocr=True)
         pi_data_ocr = parse_pi_text(pi_text_ocr.text)
         ocr_score = _pi_parse_score(pi_data_ocr)
-        if ocr_score >= native_score:
+        if ocr_score > native_score:
             pi_data = pi_data_ocr
             pi_text = pi_text_ocr
             selected_source = "ocr"

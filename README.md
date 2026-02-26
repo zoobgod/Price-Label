@@ -6,7 +6,7 @@ This app ingests:
 - Specification PDF
 
 It generates:
-1. `Proforma_Invoice.docx`
+1. `Price_List.docx`
 2. Label output(s):
 - `Label.docx` when all positions share one storage temperature
 - `Label_<temperature>.docx` per temperature group when positions differ
@@ -67,5 +67,7 @@ The app supports fixed placeholders used by your templates, including:
 Unresolved placeholders are cleared automatically.
 
 ## Notes
-- Use the Positions tab to set `storage_temperature` per position if products must be split by temperature.
+- Use the Positions section to set `storage_temperature` per position if products must be split by temperature.
 - Always review extracted fields before final export.
+- Workflow is step-based: Extract -> Review -> Generate.
+- Generated download buttons remain visible until `Start From Beginning` is clicked.

@@ -6,7 +6,7 @@ from io import BytesIO
 
 import fitz
 import pytesseract
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 from pypdf import PdfReader
 
 from .models import ExtractionMeta, TextBundle
@@ -20,7 +20,7 @@ def _extract_text_native(pdf_bytes: bytes) -> list[str]:
     return pages
 
 
-def _render_page_image(doc: fitz.Document, page_index: int, dpi: int = 300) -> Image.Image:
+def _render_page_image(doc: fitz.Document, page_index: int, dpi: int = 360) -> Image.Image:
     zoom = dpi / 72.0
     mat = fitz.Matrix(zoom, zoom)
     pix = doc.load_page(page_index).get_pixmap(matrix=mat, alpha=False)
@@ -29,13 +29,34 @@ def _render_page_image(doc: fitz.Document, page_index: int, dpi: int = 300) -> I
     return ImageOps.autocontrast(gray)
 
 
-def _extract_text_ocr_page(doc: fitz.Document, page_index: int, languages: str = "eng+rus") -> str:
-    image = _render_page_image(doc, page_index)
-    config = "--oem 3 --psm 6"
+def _ocr_image_variants(image: Image.Image) -> list[Image.Image]:
+    variants: list[Image.Image] = [image]
+    sharpen = image.filter(ImageFilter.SHARPEN)
+    variants.append(sharpen)
+    bw = sharpen.point(lambda x: 255 if x > 180 else 0, mode="1").convert("L")
+    variants.append(bw)
+    return variants
+
+
+def _ocr_once(image: Image.Image, languages: str, config: str) -> str:
     try:
         return pytesseract.image_to_string(image, lang=languages, config=config).strip()
     except pytesseract.TesseractError:
         return pytesseract.image_to_string(image, lang="eng", config=config).strip()
+
+
+def _extract_text_ocr_page(doc: fitz.Document, page_index: int, languages: str = "eng+rus") -> str:
+    image = _render_page_image(doc, page_index)
+    best = ""
+    best_score = -1
+    for variant in _ocr_image_variants(image):
+        for config in ("--oem 3 --psm 6", "--oem 3 --psm 4", "--oem 3 --psm 11"):
+            text = _ocr_once(variant, languages, config)
+            score = _quality_score(text)
+            if score > best_score:
+                best_score = score
+                best = text
+    return best
 
 
 def _resolve_ocr_languages(requested: str) -> str:
