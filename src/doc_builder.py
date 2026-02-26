@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from io import BytesIO
 from typing import Any
 
@@ -67,10 +68,10 @@ def _build_template_context(data: ExtractedData, company_info: str) -> dict[str,
         "COMPANY_INFO": company_info,
         "POSITIONS_TABLE": _position_context(data.positions),
         "POSITION_1_NAME_EN": first.name_en,
-        "POSITION_1_NAME_RU": first.name_ru,
+        "POSITION_1_NAME_RU": first.name_ru or first.name_en,
         "POSITION_1_QUANTITY": str(first.quantity or ""),
         "POSITION_1_PACKING_EN": first.packing_en,
-        "POSITION_1_PACKING_RU": first.packing_ru,
+        "POSITION_1_PACKING_RU": first.packing_ru or first.packing_en,
         "POSITION_1_PRICE": _price_str(first.unit_price),
         "POSITION_1_TOTAL": _price_str(first.total_price),
         "POSITION_1_CURRENCY": first.currency or data.currency,
@@ -90,21 +91,145 @@ def _replace_placeholders_in_paragraph(paragraph, context: dict[str, str]) -> No
         paragraph.text = text
 
 
-def fill_docx_template(template_bytes: bytes, context: dict[str, str]) -> bytes:
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _semantic_value_for_label(key_text: str, context: dict[str, str], *, doc_type: str) -> str | None:
+    text = _normalize_text(key_text)
+
+    if "invoice no" in text:
+        return context.get("INVOICE_NO", "")
+    if "invoice date" in text:
+        return context.get("INVOICE_DATE", "")
+    if "buyer" in text:
+        return context.get("BUYER_NAME", "")
+    if "exporter" in text:
+        return context.get("EXPORTER_NAME", "")
+    if "terms of delivery" in text or "delivery terms" in text:
+        return context.get("TERMS_OF_DELIVERY", "")
+    if "period of validity" in text or "validity period" in text:
+        return context.get("PERIOD_OF_VALIDITY", "")
+    if "specification date" in text or "date of specification" in text:
+        return context.get("SPECIFICATION_DATE", "")
+    if text in {"date", "date."}:
+        return context.get("SPECIFICATION_DATE") or context.get("INVOICE_DATE", "")
+    if "storage" in text or "температур" in text:
+        return context.get("STORAGE_TEMPERATURE", "")
+    if "product name" in text or "наименование" in text:
+        if doc_type == "label":
+            en = context.get("POSITION_1_NAME_EN", "")
+            ru = context.get("POSITION_1_NAME_RU", "")
+            qty = context.get("POSITION_1_QUANTITY", "")
+            pk_en = context.get("POSITION_1_PACKING_EN", "")
+            pk_ru = context.get("POSITION_1_PACKING_RU", "")
+            return f"{en} / {ru} - {qty} {pk_en} / {pk_ru}".strip()
+        return context.get("POSITION_1_NAME_EN", "")
+    if "quantity" in text or "quanitty" in text or "кол-во" in text:
+        return context.get("POSITION_1_QUANTITY", "")
+    if "packing" in text or "упаков" in text:
+        if doc_type == "label":
+            return f"{context.get('POSITION_1_PACKING_EN', '')} / {context.get('POSITION_1_PACKING_RU', '')}".strip()
+        return context.get("POSITION_1_PACKING_EN", "")
+    if "price" in text and "list" not in text:
+        value = context.get("POSITION_1_PRICE", "")
+        currency = context.get("POSITION_1_CURRENCY", "")
+        return f"{value} {currency}".strip()
+    return None
+
+
+def _replace_semantic_line(paragraph, context: dict[str, str], *, doc_type: str) -> int:
+    text = paragraph.text or ""
+    if not text.strip():
+        return 0
+
+    # Key-value line replacement (e.g. "PRODUCT NAME: ...")
+    if ":" in text:
+        left, _right = text.split(":", 1)
+        value = _semantic_value_for_label(left, context, doc_type=doc_type)
+        if value is not None:
+            paragraph.text = f"{left.strip()}: {value.strip() or '-'}"
+            return 1
+
+    normalized = _normalize_text(text)
+
+    # Label body line replacement (e.g. "<EN> / <RU> - Qty ...")
+    if doc_type == "label":
+        if "/" in text and "-" in text and "storage" not in normalized and "product name" not in normalized:
+            composed = _semantic_value_for_label("product name", context, doc_type=doc_type)
+            if composed:
+                paragraph.text = composed
+                return 1
+
+        # Also replace bilingual product lines that do not use ":" and may not include "-".
+        if (
+            "/" in text
+            and any(ch.isdigit() for ch in text)
+            and "storage" not in normalized
+            and "shipping" not in normalized
+            and "importer" not in normalized
+            and "shipper" not in normalized
+            and "contact" not in normalized
+        ):
+            composed = _semantic_value_for_label("product name", context, doc_type=doc_type)
+            if composed:
+                paragraph.text = composed
+                return 1
+
+        if "storage" in normalized or "температур" in normalized:
+            value = context.get("STORAGE_TEMPERATURE", "")
+            left = text.split(":", 1)[0] if ":" in text else "Storage"
+            paragraph.text = f"{left.strip()}: {value.strip() or '-'}"
+            return 1
+
+    # Price-list title date line where a plain date exists without explicit key.
+    if doc_type == "price":
+        has_date = re.search(r"\b\d{1,2}[-/.][A-Za-z0-9]{2,9}[-/.]\d{2,4}\b", text) or re.search(
+            r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b", text
+        )
+        if has_date and context.get("SPECIFICATION_DATE"):
+            paragraph.text = re.sub(
+                r"\b\d{1,2}[-/.][A-Za-z0-9]{2,9}[-/.]\d{2,4}\b|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",
+                context["SPECIFICATION_DATE"],
+                text,
+                count=1,
+            )
+            return 1
+
+    return 0
+
+
+def fill_docx_template(template_bytes: bytes, context: dict[str, str], *, doc_type: str) -> tuple[bytes, int]:
     doc = Document(BytesIO(template_bytes))
+    replaced = 0
 
     for p in doc.paragraphs:
+        before = p.text
         _replace_placeholders_in_paragraph(p, context)
+        if p.text != before:
+            replaced += 1
+            continue
+        replaced += _replace_semantic_line(p, context, doc_type=doc_type)
 
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
+                    before = p.text
                     _replace_placeholders_in_paragraph(p, context)
+                    if p.text != before:
+                        replaced += 1
+                        continue
+                    replaced += _replace_semantic_line(p, context, doc_type=doc_type)
+
+    if replaced and context.get("COMPANY_INFO"):
+        # If template had no company placeholder, append company details at the end.
+        if context["COMPANY_INFO"] not in "\n".join(p.text for p in doc.paragraphs):
+            doc.add_paragraph(context["COMPANY_INFO"])
 
     output = BytesIO()
     doc.save(output)
-    return output.getvalue()
+    return output.getvalue(), replaced
 
 
 def generate_price_list_doc(
@@ -114,7 +239,9 @@ def generate_price_list_doc(
 ) -> bytes:
     context = _build_template_context(data, company_info)
     if template_bytes:
-        return fill_docx_template(template_bytes, context)
+        templated, replaced = fill_docx_template(template_bytes, context, doc_type="price")
+        if replaced > 0:
+            return templated
 
     doc = Document()
     _set_default_font(doc)
@@ -174,7 +301,9 @@ def generate_label_doc(
 ) -> bytes:
     context = _build_template_context(data, company_info)
     if template_bytes:
-        return fill_docx_template(template_bytes, context)
+        templated, replaced = fill_docx_template(template_bytes, context, doc_type="label")
+        if replaced > 0:
+            return templated
 
     doc = Document()
     _set_default_font(doc)

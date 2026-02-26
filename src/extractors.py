@@ -33,7 +33,8 @@ def _extract_currency(text: str) -> str:
 
 
 def _to_float(value: str) -> float | None:
-    candidate = value.replace(",", "").strip()
+    candidate = value.replace(" ", "").replace(",", "").strip()
+    candidate = re.sub(r"[^\d.\-]", "", candidate)
     if not candidate:
         return None
     try:
@@ -79,9 +80,13 @@ def _extract_positions(pi_text: str, description_text: str, currency: str) -> li
     row_pattern = re.compile(
         r"^(?P<code>[A-Za-z0-9\-/]{3,})\s+(?P<qty>\d+(?:[.,]\d+)?)\s+(?P<unit>[\d,]+(?:\.\d{2})?)\s+(?P<total>[\d,]+(?:\.\d{2})?)$"
     )
+    row_pattern_loose = re.compile(
+        r"^(?P<code>[A-Za-z0-9\-/]{3,})\s+(?P<qty>\d+(?:[.,]\d+)?)\s+(?P<unit>[0-9,.\s]{4,20})\s+(?P<total>[0-9,.\s]{4,20})$"
+    )
 
     for line in lines:
-        m = row_pattern.match(re.sub(r"\s+", " ", line))
+        normalized = re.sub(r"\s+", " ", line)
+        m = row_pattern.match(normalized) or row_pattern_loose.match(normalized)
         if not m:
             continue
         positions.append(
@@ -94,17 +99,46 @@ def _extract_positions(pi_text: str, description_text: str, currency: str) -> li
             )
         )
 
+    if not positions:
+        # Fallback for OCR output where prices are split or missing.
+        code_qty_pattern = re.compile(r"^(?P<code>[A-Za-z0-9\-/]{3,})\s+(?P<qty>\d+(?:[.,]\d+)?)\b")
+        for line in lines:
+            m = code_qty_pattern.match(re.sub(r"\s+", " ", line))
+            if not m:
+                continue
+            if any(p.code == m.group("code") for p in positions):
+                continue
+            positions.append(
+                Position(
+                    code=m.group("code"),
+                    quantity=_to_float(m.group("qty")),
+                    currency=currency,
+                )
+            )
+
     # Extract potential packings and names from description block.
     desc_lines = [ln.strip(" -") for ln in description_text.splitlines() if ln.strip()]
     packing_candidates: list[str] = []
     name_candidates: list[str] = []
-    packing_pattern = re.compile(r"\b\d+\s*[xX]\s*\d+\s*[A-Za-z]+\b|\b\d+\s*(?:mg|g|kg|ml|l|mcg|iu)\b", re.IGNORECASE)
+    packing_pattern = re.compile(
+        r"\b\d+\s*[xX]\s*\d+\s*[A-Za-z]+\b|\b\d+\s*(?:mg|g|kg|ml|l|mcg|iu)\b",
+        re.IGNORECASE,
+    )
 
     for ln in desc_lines:
         if packing_pattern.search(ln):
             packing_candidates.append(ln)
         elif len(ln.split()) >= 2 and not re.search(r"amount in words|authorised signatory", ln, re.IGNORECASE):
             name_candidates.append(ln)
+
+    if not name_candidates:
+        # OCR fallback: select long alpha-heavy lines as probable names.
+        for ln in lines:
+            if re.search(r"(invoice|exporter|consignee|quantity|total|declaration|authorised)", ln, re.IGNORECASE):
+                continue
+            if len(re.findall(r"[A-Za-z]", ln)) >= 12 and len(ln.split()) <= 8:
+                name_candidates.append(ln)
+        name_candidates = name_candidates[:3]
 
     if not positions:
         positions = [Position(currency=currency)]
@@ -156,6 +190,13 @@ def _extract_terms(pi_text: str) -> str:
     for ln in lines:
         if incoterm_re.search(ln):
             return _clean_space(ln)
+    # OCR fallback: sometimes "Terms of Delivery and Payment" is recognized
+    # but incoterm is on the next line.
+    for idx, ln in enumerate(lines[:-1]):
+        if "terms" in ln.lower() and "delivery" in ln.lower():
+            nxt = lines[idx + 1]
+            if len(nxt.split()) > 2:
+                return _clean_space(nxt)
     return ""
 
 
@@ -256,9 +297,18 @@ def parse_msds_text(msds_text: str) -> dict[str, str]:
         if re.search(r"storage|store", ln, re.IGNORECASE) and re.search(r"°|deg|c\b|f\b|below|between|ambient|room", ln, re.IGNORECASE):
             return {"storage_temperature": _clean_space(ln)}
 
+    # Shipping/handling condition phrasing from OCR text.
+    for ln in lines:
+        if re.search(r"shipping|keep|maintain", ln, re.IGNORECASE) and re.search(
+            r"between\s*\(?\s*-?\d+\s*[°]?\s*[CF]?\s*[–\-to]+\s*-?\d+\s*[°]?\s*[CF]?",
+            ln,
+            re.IGNORECASE,
+        ):
+            return {"storage_temperature": _clean_space(ln)}
+
     # Fallback: explicit range from nearby context.
     temp_match = re.search(
-        r"(-?\d+\s*(?:to|-)\s*-?\d+\s*(?:°\s*[CF]|degrees?\s*[CF]|[CF]))",
+        r"(-?\d+\s*(?:to|–|-)\s*-?\d+\s*(?:°\s*[CF]|degrees?\s*[CF]|[CF]))",
         msds_text,
         re.IGNORECASE,
     )

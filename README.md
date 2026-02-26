@@ -17,6 +17,7 @@ Then it extracts customs-relevant fields and generates:
 ## OCR approach
 - Native PDF text extraction first (`pypdf`)
 - OCR fallback (`PyMuPDF` rendering + `pytesseract`) for low-text/scanned pages
+- PI/Invoice OCR can be force-enabled from UI (enabled by default)
 
 ## Install
 
@@ -67,7 +68,10 @@ Use placeholders like:
 - `{{POSITION_1_TOTAL}}`
 - `{{POSITION_1_CURRENCY}}`
 
-If templates are not provided, built-in default document layouts are used.
+Template behavior:
+- First pass: explicit `{{KEY}}` placeholders
+- Second pass: semantic key matching (e.g., `PRODUCT NAME:`, `QUANTITY:`, `PACKING:`, `TERMS OF DELIVERY:`, `Storage:`)
+- If no fields can be mapped, the app automatically falls back to built-in generated documents (it will not return an unchanged template).
 
 ## Notes
 - Extraction quality depends on source PDF quality and consistent formatting.

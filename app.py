@@ -77,6 +77,8 @@ with st.sidebar:
     label_template = st.file_uploader("Label .docx template", type=["docx"], key="label_tpl")
 
     st.header("OCR")
+    force_pi_ocr = st.checkbox("Force OCR on PI/Invoice", value=True)
+    force_spec_ocr = st.checkbox("Force OCR on Specification", value=False)
     force_msds_ocr = st.checkbox("Force OCR on MSDS", value=True)
 
     run = st.button("Extract Documents", type="primary", use_container_width=True)
@@ -90,14 +92,17 @@ if run:
                 pi_pdf_bytes=pi_pdf.getvalue(),
                 msds_pdf_bytes=msds_pdf.getvalue() if msds_pdf else None,
                 specification_pdf_bytes=spec_pdf.getvalue() if spec_pdf else None,
+                force_ocr_pi=force_pi_ocr,
+                force_ocr_specification=force_spec_ocr,
                 force_ocr_msds=force_msds_ocr,
             )
         st.session_state["extracted"] = extracted
         st.session_state["logs"] = logs
+        pi_meta = (logs.get("pi") or {}).get("meta") or {}
         msds_meta = (logs.get("msds") or {}).get("meta") or {}
-        if msds_pdf and not msds_meta.get("tesseract_available", False):
+        if (pi_pdf or msds_pdf or spec_pdf) and not (pi_meta.get("tesseract_available", False) or msds_meta.get("tesseract_available", False)):
             st.warning(
-                "Tesseract OCR is not available on this machine. Scanned MSDS files may not extract storage temperature."
+                "Tesseract OCR is not available on this machine. Scanned PDFs may extract poorly until OCR is installed."
             )
 
 if "extracted" in st.session_state:
