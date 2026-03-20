@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 
 @dataclass
@@ -19,20 +18,6 @@ class Position:
 
 
 @dataclass
-class ExtractionMeta:
-    tesseract_available: bool = False
-    pages_total: int = 0
-    pages_ocrd: int = 0
-    per_page_source: list[str] = field(default_factory=list)
-
-
-@dataclass
-class TextBundle:
-    text: str
-    meta: ExtractionMeta
-
-
-@dataclass
 class ExtractedData:
     invoice_no: str = ""
     invoice_date: str = ""
@@ -47,4 +32,3 @@ class ExtractedData:
     storage_temperature: str = ""
     positions: list[Position] = field(default_factory=list)
     currency: str = ""
-    raw: dict[str, Any] = field(default_factory=dict)

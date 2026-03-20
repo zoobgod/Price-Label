@@ -1,2 +1,1 @@
-tesseract-ocr
-tesseract-ocr-rus
+# No system packages required – OCR is handled by Claude Vision API
